@@ -1,0 +1,8 @@
+.env
+.venv/
+venv/
+zyro_state.json
+zyro_state.tmp
+__pycache__/
+node_modules/
+*.zip

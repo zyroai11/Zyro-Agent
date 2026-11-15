@@ -1,0 +1,37 @@
+{
+  "name": "zyro-agent",
+  "version": "0.1.0",
+  "description": "Zyro: scan and trade Robinhood Chain tokens from your terminal, with your own rules, stop loss and take profit.",
+  "bin": {
+    "zyro": "bin/zyro.js"
+  },
+  "files": [
+    "bin/",
+    "zyro_agent/*.py",
+    "requirements.txt",
+    ".env.example",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "robinhood-chain",
+    "trading",
+    "agent",
+    "uniswap",
+    "crypto",
+    "cli",
+    "zyro"
+  ],
+  "homepage": "https://zyro-ai.xyz",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zyroai11/Zyro-Agent.git"
+  },
+  "bugs": {
+    "url": "https://github.com/zyroai11/Zyro-Agent/issues"
+  }
+}

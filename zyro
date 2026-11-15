@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Runs the Zyro agent from wherever it is installed.
+DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+exec "$DIR/.venv/bin/python" -m zyro_agent.cli "$@"
