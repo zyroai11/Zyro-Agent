@@ -26,7 +26,7 @@ BLOCKSCOUT_API_KEY = os.getenv("BLOCKSCOUT_API_KEY", "").strip()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
-SITE_API = os.getenv("SITE_API", "https://zyro-ai.xyz").rstrip("/")
+SITE_API = os.getenv("SITE_API", "https://www.zyro-ai.xyz").rstrip("/")
 CHAIN_ID_DEX = "robinhood"
 DATA_FILE = Path(os.getenv("DATA_FILE", "zyro_data.json"))
 ADDR_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
@@ -181,7 +181,7 @@ async def zyro_balance(client: httpx.AsyncClient, wallet: str) -> float:
     # fallback: the Zyro website reads the same balance from its own server
     try:
         r = await client.get(f"{SITE_API}/api/holder", params={"wallet": wallet},
-                             headers={"User-Agent": "zyro-bot/1.0"})
+                             headers={"User-Agent": "zyro-bot/1.0"}, follow_redirects=True)
         r.raise_for_status()
         return float(r.json()["balance"])
     except Exception as e:
