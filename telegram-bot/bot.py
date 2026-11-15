@@ -26,6 +26,7 @@ BLOCKSCOUT_API_KEY = os.getenv("BLOCKSCOUT_API_KEY", "").strip()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
+SITE_API = os.getenv("SITE_API", "https://zyro-ai.xyz").rstrip("/")
 CHAIN_ID_DEX = "robinhood"
 DATA_FILE = Path(os.getenv("DATA_FILE", "zyro_data.json"))
 ADDR_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
@@ -156,7 +157,7 @@ async def explorer_info(client: httpx.AsyncClient, address: str) -> dict:
 async def rpc_call(client: httpx.AsyncClient, to: str, data: str) -> str:
     payload = {"jsonrpc": "2.0", "id": 1, "method": "eth_call",
                "params": [{"to": to, "data": data}, "latest"]}
-    r = await client.post(RPC_URL, json=payload)
+    r = await client.post(RPC_URL, json=payload, headers={"User-Agent": "zyro-bot/1.0"})
     r.raise_for_status()
     out = r.json()
     if "error" in out or not out.get("result") or out["result"] == "0x":
@@ -169,14 +170,22 @@ async def zyro_balance(client: httpx.AsyncClient, wallet: str) -> float:
         return 0.0
     padded = wallet.lower().replace("0x", "").rjust(64, "0")
     last = None
-    for _ in range(3):
+    for _ in range(2):
         try:
             raw = await rpc_call(client, ZYRO_TOKEN_ADDRESS, "0x70a08231" + padded)
             return int(raw, 16) / 1e18  # $ZYRO uses 18 decimals
         except Exception as e:
             last = e
-            await asyncio.sleep(0.6)
-    raise last
+            await asyncio.sleep(0.5)
+    log.warning("RPC balance check failed (%r), trying the website API", last)
+    # fallback: the Zyro website reads the same balance from its own server
+    try:
+        r = await client.get(f"{SITE_API}/api/holder", params={"wallet": wallet},
+                             headers={"User-Agent": "zyro-bot/1.0"})
+        r.raise_for_status()
+        return float(r.json()["balance"])
+    except Exception as e:
+        raise RuntimeError(f"rpc: {last!r} / site: {e!r}")
 
 async def ai_summary(client: httpx.AsyncClient, facts: str) -> str | None:
     if not GEMINI_API_KEY:
