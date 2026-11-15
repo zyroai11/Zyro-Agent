@@ -31,6 +31,20 @@ CHAIN_ID_DEX = "robinhood"
 DATA_FILE = Path(os.getenv("DATA_FILE", "zyro_data.json"))
 ADDR_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
 
+_CLIENT: httpx.AsyncClient | None = None
+def client() -> httpx.AsyncClient:
+    """One shared HTTP client, so connections are reused between commands."""
+    global _CLIENT
+    if _CLIENT is None:
+        _CLIENT = httpx.AsyncClient(timeout=httpx.Timeout(12, connect=4),
+                                    headers={"User-Agent": "zyro-bot/1.0"}, follow_redirects=True)
+    return _CLIENT
+
+BAL_CACHE: dict[str, tuple[float, float]] = {}   # wallet -> (time, balance)
+BAL_TTL = 120
+TREND_CACHE: dict[str, tuple[float, list]] = {}
+TREND_TTL = 60
+
 logging.basicConfig(format="%(asctime)s %(levelname)s %(message)s", level=logging.INFO)
 log = logging.getLogger("zyro")
 
@@ -131,9 +145,12 @@ def bs(path: str) -> tuple[str, dict]:
 async def explorer_info(client: httpx.AsyncClient, address: str) -> dict:
     """Contract verification + holder count from Blockscout (best effort)."""
     info = {"verified": None, "holders": None}
+    u1, p1 = bs(f"smart-contracts/{address}")
+    u2, p2 = bs(f"tokens/{address}")
+    r1, r2 = await asyncio.gather(client.get(u1, params=p1), client.get(u2, params=p2), return_exceptions=True)
     try:
-        url, params = bs(f"smart-contracts/{address}")
-        r = await client.get(url, params=params)
+        if isinstance(r1, Exception): raise r1
+        r = r1
         if r.status_code == 200:
             info["verified"] = bool(r.json().get("is_verified"))
         elif r.status_code == 404:
@@ -143,8 +160,8 @@ async def explorer_info(client: httpx.AsyncClient, address: str) -> dict:
     except Exception as e:
         log.info("explorer contract lookup failed: %s", e)
     try:
-        url, params = bs(f"tokens/{address}")
-        r = await client.get(url, params=params)
+        if isinstance(r2, Exception): raise r2
+        r = r2
         if r.status_code == 200:
             h = r.json().get("holders") or r.json().get("holders_count")
             info["holders"] = int(h) if h is not None else None
@@ -164,28 +181,38 @@ async def rpc_call(client: httpx.AsyncClient, to: str, data: str) -> str:
         raise RuntimeError(f"rpc error: {out.get('error')}")
     return out["result"]
 
-async def zyro_balance(client: httpx.AsyncClient, wallet: str) -> float:
-    """ERC-20 balanceOf(wallet) for the ZYRO token, in whole tokens."""
-    if not ZYRO_TOKEN_ADDRESS:
-        return 0.0
+async def _bal_rpc(c: httpx.AsyncClient, wallet: str) -> float:
     padded = wallet.lower().replace("0x", "").rjust(64, "0")
-    last = None
-    for _ in range(2):
-        try:
-            raw = await rpc_call(client, ZYRO_TOKEN_ADDRESS, "0x70a08231" + padded)
-            return int(raw, 16) / 1e18  # $ZYRO uses 18 decimals
-        except Exception as e:
-            last = e
-            await asyncio.sleep(0.5)
-    log.warning("RPC balance check failed (%r), trying the website API", last)
-    # fallback: the Zyro website reads the same balance from its own server
+    raw = await rpc_call(c, ZYRO_TOKEN_ADDRESS, "0x70a08231" + padded)
+    return int(raw, 16) / 1e18  # $ZYRO uses 18 decimals
+
+async def _bal_site(c: httpx.AsyncClient, wallet: str) -> float:
+    r = await c.get(f"{SITE_API}/api/holder", params={"wallet": wallet})
+    r.raise_for_status()
+    return float(r.json()["balance"])
+
+async def zyro_balance(c: httpx.AsyncClient, wallet: str) -> float:
+    """ERC-20 balance of $ZYRO. Asks the chain and the website at the same time and takes the first answer."""
+    key = wallet.lower()
+    hit = BAL_CACHE.get(key)
+    if hit and time.time() - hit[0] < BAL_TTL:
+        return hit[1]
+    tasks = [asyncio.create_task(_bal_rpc(c, wallet)), asyncio.create_task(_bal_site(c, wallet))]
+    errors = []
     try:
-        r = await client.get(f"{SITE_API}/api/holder", params={"wallet": wallet},
-                             headers={"User-Agent": "zyro-bot/1.0"}, follow_redirects=True)
-        r.raise_for_status()
-        return float(r.json()["balance"])
-    except Exception as e:
-        raise RuntimeError(f"rpc: {last!r} / site: {e!r}")
+        for fut in asyncio.as_completed(tasks, timeout=10):
+            try:
+                bal = await fut
+                BAL_CACHE[key] = (time.time(), bal)
+                return bal
+            except Exception as e:
+                errors.append(repr(e))
+    except asyncio.TimeoutError:
+        errors.append("timeout")
+    finally:
+        for t in tasks:
+            t.cancel()
+    raise RuntimeError(" / ".join(errors) or "no answer")
 
 async def ai_summary(client: httpx.AsyncClient, facts: str) -> str | None:
     if not GEMINI_API_KEY:
@@ -303,8 +330,8 @@ async def cmd_link(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     DATA["wallets"][str(update.effective_user.id)] = ctx.args[0]
     save_data(DATA)
-    async with httpx.AsyncClient(timeout=15) as c:
-        tier, bal = await user_tier(c, update.effective_user.id)
+    BAL_CACHE.pop(ctx.args[0].lower(), None)
+    tier, bal = await user_tier(client(), update.effective_user.id)
     await update.message.reply_html(
         ("✅ Wallet linked.\n⚠️ Could not read your balance right now. Send /me in a minute to check again."
          if tier == "error" else
@@ -315,8 +342,7 @@ async def cmd_link(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_me(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    async with httpx.AsyncClient(timeout=15) as c:
-        tier, bal = await user_tier(c, uid)
+    tier, bal = await user_tier(client(), uid)
     wallet = DATA["wallets"].get(str(uid), "not linked. Send /link 0xYourWallet")
     left = "∞" if tier == "holder" else max(0, FREE_SCANS_PER_DAY - scans_used(uid))
     await update.message.reply_html(
@@ -332,76 +358,93 @@ async def cmd_scan(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Usage: /scan 0xTokenContractAddress")
         return
     address = ctx.args[0]
+    c = client()
 
-    async with httpx.AsyncClient(timeout=20) as c:
-        tier, _ = await user_tier(c, uid)
-        if tier != "holder" and scans_used(uid) >= FREE_SCANS_PER_DAY:
-            await update.message.reply_html(
-                f"⛔ You have used your {FREE_SCANS_PER_DAY} free scans for today.\n"
-                f"Hold {HOLDER_MIN:,.0f}+ $ZYRO and /link your wallet for unlimited scans."
-            )
-            return
+    # answer right away, then fetch everything at the same time
+    msg = await update.message.reply_text("🔍 Zyro is scanning...")
+    tier_t = asyncio.create_task(user_tier(c, uid))
+    dex_t = asyncio.create_task(dex_token(c, address))
+    chain_t = asyncio.create_task(explorer_info(c, address))
 
-        msg = await update.message.reply_text("🔍 Zyro is scanning...")
+    tier, _ = await tier_t
+    if tier != "holder" and scans_used(uid) >= FREE_SCANS_PER_DAY:
+        dex_t.cancel(); chain_t.cancel()
+        await msg.edit_text(
+            f"⛔ You have used your {FREE_SCANS_PER_DAY} free scans for today.\n"
+            f"Hold {HOLDER_MIN:,.0f}+ $ZYRO and /link your wallet for unlimited scans.",
+            parse_mode=ParseMode.HTML)
+        return
+    try:
+        pairs = await dex_t
+    except Exception as e:
+        log.warning("dexscreener error: %s", e)
+        chain_t.cancel()
+        await msg.edit_text("❌ Could not load market data. Try again in a moment.")
+        return
+    if not pairs:
+        chain_t.cancel()
+        await msg.edit_text("❌ No trading pair found for this token on Robinhood Chain.")
+        return
+
+    pair = max(pairs, key=lambda p: float((p.get("liquidity") or {}).get("usd") or 0))
+    chain = await chain_t
+    score, flags = risk_score(pair, chain)
+
+    base = pair.get("baseToken", {})
+    pc = pair.get("priceChange") or {}
+    tx = (pair.get("txns") or {}).get("h24") or {}
+    lines = [
+        f"⚡ <b>ZYRO SCAN</b> — {esc(base.get('name', '?'))} (${esc(base.get('symbol', '?'))})",
+        f"<code>{address}</code>",
+        "",
+        f"<b>Safety score: {score}/100</b>  {verdict(score)}",
+        "",
+        f"💵 Price: {fmt_usd(pair.get('priceUsd'))}",
+        f"💧 Liquidity: {fmt_usd((pair.get('liquidity') or {}).get('usd'))}",
+        f"🏦 FDV: {fmt_usd(pair.get('fdv'))}",
+        f"📊 Volume 24h: {fmt_usd((pair.get('volume') or {}).get('h24'))}",
+        f"🔁 Txns 24h: {tx.get('buys', 0)} buy / {tx.get('sells', 0)} sell",
+        f"⏱ Pair age: {age_text(pair.get('pairCreatedAt'))}",
+        f"📈 1h {fmt_pct(pc.get('h1'))} | 24h {fmt_pct(pc.get('h24'))}",
+        f"👥 Holders: {chain['holders'] if chain['holders'] is not None else '-'}",
+        f"📜 Contract verified: "
+        f"{'✅' if chain['verified'] else ('❌' if chain['verified'] is False else '-')}",
+        f"🏛 DEX: {esc(pair.get('dexId', '-'))}",
+        "",
+    ]
+    lines += ["<b>Risk notes:</b>"] + (flags or ["✅ No major red flags found"])
+    links = ["", f"<a href=\"{pair.get('url', '')}\">DexScreener</a> · "
+                 f"<a href=\"{EXPLORER}/token/{address}\">Explorer</a>"]
+    add_scan(uid)
+
+    holder_ai = tier == "holder" and bool(GEMINI_API_KEY)
+    if tier != "holder":
+        tail = ["", "🔒 <i>AI analysis is for $ZYRO holders</i>"]
+    elif holder_ai:
+        tail = ["", "🤖 <i>AI analysis is loading...</i>"]
+    else:
+        tail = []
+    # show the report now; the AI part follows in a few seconds
+    await msg.edit_text("\n".join(lines + tail + links), parse_mode=ParseMode.HTML,
+                        disable_web_page_preview=True)
+    if holder_ai:
+        facts = "\n".join(re.sub("<[^>]+>", "", l) for l in lines)
+        summary = await ai_summary(c, facts)
+        tail = ["", "🤖 <b>AI analysis</b>", esc(summary)] if summary else []
         try:
-            pairs = await dex_token(c, address)
+            await msg.edit_text("\n".join(lines + tail + links), parse_mode=ParseMode.HTML,
+                                disable_web_page_preview=True)
         except Exception as e:
-            log.warning("dexscreener error: %s", e)
-            await msg.edit_text("❌ Could not load market data. Try again in a moment.")
-            return
-        if not pairs:
-            await msg.edit_text("❌ No trading pair found for this token on Robinhood Chain.")
-            return
-
-        pair = max(pairs, key=lambda p: float((p.get("liquidity") or {}).get("usd") or 0))
-        chain = await explorer_info(c, address)
-        score, flags = risk_score(pair, chain)
-
-        base = pair.get("baseToken", {})
-        pc = pair.get("priceChange") or {}
-        tx = (pair.get("txns") or {}).get("h24") or {}
-        lines = [
-            f"⚡ <b>ZYRO SCAN</b> — {esc(base.get('name', '?'))} (${esc(base.get('symbol', '?'))})",
-            f"<code>{address}</code>",
-            "",
-            f"<b>Safety score: {score}/100</b>  {verdict(score)}",
-            "",
-            f"💵 Price: {fmt_usd(pair.get('priceUsd'))}",
-            f"💧 Liquidity: {fmt_usd((pair.get('liquidity') or {}).get('usd'))}",
-            f"🏦 FDV: {fmt_usd(pair.get('fdv'))}",
-            f"📊 Volume 24h: {fmt_usd((pair.get('volume') or {}).get('h24'))}",
-            f"🔁 Txns 24h: {tx.get('buys', 0)} buy / {tx.get('sells', 0)} sell",
-            f"⏱ Pair age: {age_text(pair.get('pairCreatedAt'))}",
-            f"📈 1h {fmt_pct(pc.get('h1'))} | 24h {fmt_pct(pc.get('h24'))}",
-            f"👥 Holders: {chain['holders'] if chain['holders'] is not None else '-'}",
-            f"📜 Contract verified: "
-            f"{'✅' if chain['verified'] else ('❌' if chain['verified'] is False else '-')}",
-            f"🏛 DEX: {esc(pair.get('dexId', '-'))}",
-            "",
-        ]
-        lines += ["<b>Risk notes:</b>"] + (flags or ["✅ No major red flags found"])
-
-        if tier == "holder":
-            facts = "\n".join(re.sub("<[^>]+>", "", l) for l in lines)
-            summary = await ai_summary(c, facts)
-            if summary:
-                lines += ["", "🤖 <b>AI analysis</b>", esc(summary)]
-        else:
-            lines += ["", "🔒 <i>AI analysis is for $ZYRO holders</i>"]
-
-        lines += [
-            "",
-            f"<a href=\"{pair.get('url', '')}\">DexScreener</a> · "
-            f"<a href=\"{EXPLORER}/token/{address}\">Explorer</a>",
-        ]
-        add_scan(uid)
-        await msg.edit_text("\n".join(lines), parse_mode=ParseMode.HTML,
-                            disable_web_page_preview=True)
+            log.info("AI edit failed: %s", e)
 
 async def cmd_trending(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    async with httpx.AsyncClient(timeout=20) as c:
+    hit = TREND_CACHE.get("t")
+    if hit and time.time() - hit[0] < TREND_TTL:
+        items = hit[1]
+    else:
         try:
-            items = await dex_trending(c)
+            items = await dex_trending(client())
+            TREND_CACHE["t"] = (time.time(), items)
         except Exception as e:
             log.warning("trending error: %s", e)
             await update.message.reply_text("❌ Could not load trending tokens.")
