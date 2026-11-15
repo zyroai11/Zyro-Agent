@@ -52,6 +52,7 @@ def main(argv=None):
     c = sub.add_parser("chat", help="Talk to the agent in plain language")
     c.add_argument("--live", action="store_true")
 
+    sub.add_parser("init", help="Show where your settings file is")
     sub.add_parser("wallet", help="Wallet address and ETH balance")
     sub.add_parser("rules", help="Show your trading rules")
 
@@ -75,6 +76,12 @@ def main(argv=None):
             agent.watch(a.live, a.interval)
         elif a.cmd == "chat":
             ai.chat(a.live)
+        elif a.cmd == "init":
+            env = C.HOME / ".env"
+            if not env.exists() and (C.HOME / ".env.example").exists():
+                env.write_text((C.HOME / ".env.example").read_text()); env.chmod(0o600)
+            console.print(f"Your settings file:\n  {env}\n\nOpen it with:  nano {env}\n"
+                          "Add UNISWAP_API_KEY, PRIVATE_KEY (a new wallet with small funds) and GEMINI_API_KEY. Then try: zyro scan 0x…")
         elif a.cmd == "wallet":
             agent.wallet()
         elif a.cmd == "rules":
