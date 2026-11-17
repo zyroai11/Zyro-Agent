@@ -138,7 +138,7 @@ HELP = (
     "/trending robinhood — the same for Robinhood Chain\n"
     "/me — scans left today\n\n"
     f"{FREE_SCANS_PER_DAY} free scans a day, AI analysis included. Unlimited scans at zyro-ai.xyz/app\n\n"
-    "🚀 $ZYRO is launching soon on StonkFun. No contract address yet: only trust the launch post on X @ZyroxRH.\n\n"
+    "🚀 $ZYRO is launching soon on StonkFun. No contract address yet: only trust the launch post on X @zyroxstonk.\n\n"
     "<i>Always do your own research.</i>"
 )
 

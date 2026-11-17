@@ -78,5 +78,5 @@ Swaps go through the Uniswap Trading API, which finds the best route across Unis
 
 - Website: https://zyro-ai.xyz
 - Telegram bot: https://t.me/ZyroAiAgent_bot
-- X: https://x.com/zyroxrh
+- X: https://x.com/zyroxstonk
 - $ZYRO on Robinhood Chain: `0x50e05d1ee5e545540190a1136667af06a496f6d2`

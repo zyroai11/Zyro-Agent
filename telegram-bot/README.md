@@ -16,7 +16,7 @@ Gratis: `FREE_SCANS_PER_DAY` scan per hari (default 3), analisis AI sudah termas
 Scan tanpa batas di zyro-ai.xyz/app.
 
 ## $ZYRO
-$ZYRO akan launch di StonkFun (stonkfun.xyz). CA resmi hanya diumumkan di X @ZyroxRH.
+$ZYRO akan launch di StonkFun (stonkfun.xyz). CA resmi hanya diumumkan di X @zyroxstonk.
 
 ## Cara menjalankan
 1. Install Python 3.10+.
